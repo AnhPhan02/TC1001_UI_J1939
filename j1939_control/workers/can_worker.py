@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from ..backend.base import CanBackend, CanFrame
 from ..backend.mock import MockBackend
-from ..backend.tsmaster_com import TSMasterComBackend
+from ..backend.tsmaster_native import TSMasterBackend
 from ..config import ConnectionConfig
 from ..protocol.commands import CommandRequest, Opcode, decode_response, make_set_const_engine_speed
 from ..protocol.j1939 import EEC1_PGN, decode_eec1_engine_speed, parse_j1939_id
@@ -56,7 +56,7 @@ class CanWorker(QObject):
             if backend_kind == "mock":
                 backend = MockBackend()
             elif backend_kind == "tsmaster":
-                backend = TSMasterComBackend()
+                backend = TSMasterBackend()
             else:
                 raise ValueError(f"Unknown backend: {backend_kind}")
             backend.connect(config)
@@ -70,10 +70,14 @@ class CanWorker(QObject):
         self._last_readback_at = None
         self._stale_emitted = False
         self.connected.emit()
+        mapping = getattr(backend, "mapping_description", None)
         self.log_message.emit(
             f"CAN connected: backend={backend_kind}, channel={config.channel}, "
             f"bitrate={config.bitrate_kbps} kbit/s"
+            + (f", mapping={mapping}" if mapping else "")
         )
+        self.log_message.emit("Verifying STM32 automatically with TC1001...")
+        self.send_tc1001()
 
     @Slot()
     def disconnect_backend(self) -> None:
@@ -93,6 +97,9 @@ class CanWorker(QObject):
 
     @Slot()
     def send_tc1001(self) -> None:
+        if any(item.opcode is Opcode.TC1001 for item in self._pending.values()):
+            self.command_result.emit("TC1001 verification is already in progress", False)
+            return
         self._send_request(CommandRequest(Opcode.TC1001, self._next_sequence()))
 
     @Slot(float)
@@ -152,7 +159,6 @@ class CanWorker(QObject):
             item = self._pending.pop(sequence)
             message = f"{item.opcode.name} timeout (seq=0x{sequence:02X})"
             self.command_result.emit(message, False)
-            self.log_message.emit(message)
 
         if (
             self._last_readback_at is not None

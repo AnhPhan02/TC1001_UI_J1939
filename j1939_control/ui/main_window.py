@@ -66,7 +66,7 @@ class MainWindow(QMainWindow):
         connection_layout = QGridLayout(connection_group)
         self.backend_combo = QComboBox()
         self.backend_combo.addItem("Mock (offline)", "mock")
-        self.backend_combo.addItem("TSMaster COM", "tsmaster")
+        self.backend_combo.addItem("TSMaster Native API", "tsmaster")
         index = self.backend_combo.findData(initial_backend)
         self.backend_combo.setCurrentIndex(max(index, 0))
         self.channel_spin = QSpinBox()
@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
         self.stm32_address_edit = QLineEdit("80")
         self.connect_button = QPushButton("Connect")
         self.connect_button.clicked.connect(self._toggle_connection)
-        self.check_button = QPushButton("Check STM32")
+        self.check_button = QPushButton("Retry STM32 Check")
         self.check_button.setEnabled(False)
         self.check_button.clicked.connect(self.tc1001_requested.emit)
         self.state_label = QLabel()
@@ -166,7 +166,7 @@ class MainWindow(QMainWindow):
         self.check_button.setEnabled(True)
         self.backend_combo.setEnabled(False)
         self.apply_button.setEnabled(False)
-        self._set_state("CAN Connected - STM32 not verified", "#0969a2")
+        self._set_state("CAN Connected - verifying STM32...", "#0969a2")
 
     @Slot()
     def _on_disconnected(self) -> None:
@@ -195,6 +195,10 @@ class MainWindow(QMainWindow):
     def _on_command_result(self, message: str, succeeded: bool) -> None:
         self.statusBar().showMessage(message, 5000)
         self._append_log(("OK: " if succeeded else "ERROR: ") + message)
+        if not succeeded and message.startswith("TC1001"):
+            self._ready = False
+            self.apply_button.setEnabled(False)
+            self._set_state("CAN Connected - STM32 not verified", "#9a6700")
 
     @Slot(object, str)
     def _on_readback_changed(self, value: object, state: str) -> None:

@@ -5,17 +5,16 @@ import json
 import platform
 import struct
 import sys
-import winreg
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-TSMASTER_PROGID = r"TSMaster.TSApplication"
-TSMASTER_PATHS = (
-    Path.home() / "AppData/Local/Programs/TOSUN/TSMaster/bin64/TSMaster64.exe",
-    Path.home() / "AppData/Local/Programs/TOSUN/TSMaster/bin/TSMaster.exe",
-    Path(r"C:/Program Files (x86)/TOSUN/TSMaster/bin/TSMaster.exe"),
-    Path(r"C:/Program Files/TOSUN/TSMaster/bin64/TSMaster64.exe"),
+from j1939_control.backend.tsmaster_native import (
+    _configure_api,
+    _find_tsmaster_dll,
+    _load_tsmaster_dll,
 )
+
 
 
 def module_status(module: str) -> dict[str, object]:
@@ -23,17 +22,18 @@ def module_status(module: str) -> dict[str, object]:
     return {"ok": spec is not None, "location": None if spec is None else spec.origin}
 
 
-def progid_registered(progid: str) -> bool:
+def native_api_status() -> dict[str, object]:
     try:
-        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, progid):
-            return True
-    except FileNotFoundError:
-        return False
+        path = _find_tsmaster_dll()
+        dll = _load_tsmaster_dll(path)
+        _configure_api(dll)
+        return {"ok": True, "location": str(path), "error": None}
+    except Exception as exc:
+        return {"ok": False, "location": None, "error": str(exc)}
 
 
 def main() -> int:
-    tsmaster_executables = [str(path) for path in TSMASTER_PATHS if path.exists()]
-    tsmaster_com_registered = progid_registered(TSMASTER_PROGID)
+    native_api = native_api_status()
     report = {
         "os": platform.platform(),
         "windows": sys.platform == "win32",
@@ -42,25 +42,18 @@ def main() -> int:
         "python_bits": struct.calcsize("P") * 8,
         "packages": {
             "PySide6": module_status("PySide6"),
-            "win32com.client": module_status("win32com.client"),
-            "pythoncom": module_status("pythoncom"),
         },
-        "tsmaster_executables": tsmaster_executables,
-        "tsmaster_com_progid": tsmaster_com_registered,
+        "tsmaster_native_api": native_api,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
     required_ok = (
         report["windows"]
         and all(item["ok"] for item in report["packages"].values())
-        and bool(tsmaster_executables)
-        and tsmaster_com_registered
+        and native_api["ok"]
     )
     print("\nRESULT:", "READY" if required_ok else "NOT READY")
-    if not tsmaster_com_registered:
-        print(
-            "FIX: Run TSMaster64.exe once as Administrator to register the COM type library, "
-            "then run this check again. If still missing, reinstall TSMaster as Administrator."
-        )
+    if not native_api["ok"]:
+        print("FIX: Repair/reinstall the 64-bit TSMaster native API. Detail:", native_api["error"])
     return 0 if required_ok else 1
 
 

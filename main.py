@@ -14,7 +14,7 @@ def parse_args() -> argparse.Namespace:
         "--backend",
         choices=("mock", "tsmaster"),
         default="mock",
-        help="Communication backend. Start with mock until TSMaster COM is registered.",
+        help="Communication backend. Start with mock until the native TSMaster API is ready.",
     )
     return parser.parse_args()
 
