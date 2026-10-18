@@ -104,6 +104,12 @@ class CanWorker(QObject):
 
     @Slot(float)
     def apply_engine_speed(self, rpm: float) -> None:
+        if any(
+            item.opcode in (Opcode.SET_CONST, Opcode.START)
+            for item in self._pending.values()
+        ):
+            self.command_result.emit("SET_CONST/START sequence is already in progress", False)
+            return
         try:
             request = make_set_const_engine_speed(self._next_sequence(), rpm)
         except ValueError as exc:
@@ -216,6 +222,11 @@ class CanWorker(QObject):
             self.command_result.emit(message, True)
             if response.request_opcode is Opcode.TC1001:
                 self.stm32_ready.emit()
+            elif response.request_opcode is Opcode.SET_CONST:
+                self.log_message.emit("SET_CONST accepted; sending START...")
+                self._send_request(CommandRequest(Opcode.START, self._next_sequence()))
+            elif response.request_opcode is Opcode.START:
+                self.readback_changed.emit(None, "Waiting for EEC1")
         else:
             message = (
                 f"{response.request_opcode.name} rejected: "

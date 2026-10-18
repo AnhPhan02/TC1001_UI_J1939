@@ -33,6 +33,12 @@ class CommandTests(unittest.TestCase):
             request.encode(),
         )
 
+    def test_start_vector(self) -> None:
+        self.assertEqual(
+            bytes.fromhex("03 2B 00 00 00 00 00 00"),
+            CommandRequest(Opcode.START, 0x2B).encode(),
+        )
+
     def test_resolution_rounding(self) -> None:
         self.assertEqual(1, physical_engine_speed_to_raw(0.125))
         self.assertEqual(1, physical_engine_speed_to_raw(0.0625))

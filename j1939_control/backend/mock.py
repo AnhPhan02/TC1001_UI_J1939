@@ -16,6 +16,7 @@ class MockBackend:
     def __init__(self) -> None:
         self._config: ConnectionConfig | None = None
         self._rx: deque[CanFrame] = deque()
+        self._engine_speed_raw: int | None = None
 
     def connect(self, config: ConnectionConfig) -> None:
         self._config = config
@@ -23,6 +24,7 @@ class MockBackend:
     def disconnect(self) -> None:
         self._config = None
         self._rx.clear()
+        self._engine_speed_raw = None
 
     def send(self, frame: CanFrame) -> None:
         if self._config is None:
@@ -41,11 +43,17 @@ class MockBackend:
         if opcode is Opcode.SET_CONST and argument16 != ENGINE_SPEED_SIGNAL_KEY:
             status = 2
             detail = 1
+        elif opcode is Opcode.SET_CONST:
+            self._engine_speed_raw = argument32
+        elif opcode is Opcode.START and self._engine_speed_raw is None:
+            status = 3
+            detail = 1
         self._queue_ack(opcode_value, sequence, status, detail, argument32)
 
-        if opcode is Opcode.SET_CONST and status == 0:
+        if opcode is Opcode.START and status == 0:
+            assert self._engine_speed_raw is not None
             payload = bytearray(b"\xFF" * 8)
-            payload[3:5] = int(argument32).to_bytes(2, "little", signed=False)
+            payload[3:5] = self._engine_speed_raw.to_bytes(2, "little", signed=False)
             eec1_id = build_j1939_id(
                 priority=3,
                 pgn=EEC1_PGN,

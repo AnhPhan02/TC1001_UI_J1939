@@ -81,10 +81,12 @@ python main.py --backend mock
 In the UI, click **Connect**. The app automatically sends one TC1001 verification request.
 Use **Retry STM32 Check** only if the first request times out. Leave Engine Speed at `1500`,
 then click **Apply** after the state changes to **STM32 Ready**.
-The mock backend must show:
+The mock backend must show this command sequence:
 
-- TX ID `0x18EF80F9`, payload `10 .. 67 00 E0 2E 00 00`;
-- a matched application ACK from `0x18EFF980`;
+- TX `SET_CONST` on ID `0x18EF80F9`, payload `10 .. 67 00 E0 2E 00 00`;
+- RX successful `SET_CONST` ACK `90 .. 00 00 E0 2E 00 00` from `0x18EFF980`;
+- automatic TX `START` payload `03 .. 00 00 00 00 00 00`;
+- RX successful `START` ACK `83 .. 00 00 00 00 00 00`;
 - EEC1 ID `0x0CF00480` and readback `1500.000 rpm`;
 - `Stale` after one second without another EEC1 frame.
 
@@ -103,8 +105,10 @@ RX uses `tsfifo_receive_can_msgs` with a packed `TLIBCAN`; TX uses
 never accepted as STM32 feedback. The logical channel must already be mapped to the intended
 physical adapter in TSMaster.
 
-The proprietary opcode contract (`TC1001=0x01`, `SET_CONST=0x10`, signal key `103`) must be
-confirmed in STM32 firmware. A successful CAN transmit is not treated as an application ACK.
+The proprietary opcode contract (`TC1001=0x01`, `SET_CONST=0x10`, `START=0x03`, signal key
+`103`) must be implemented in STM32 firmware. After a successful `SET_CONST` ACK, the UI
+automatically sends `START`; EEC1 is accepted as readback only after independent RX from the
+bus. A successful CAN transmit is not treated as an application ACK.
 Physical values that fall halfway between two raw steps use decimal round-half-up; the UI itself
 steps Engine Speed in exact 0.125 rpm increments.
 # TC1001_UI_J1939
