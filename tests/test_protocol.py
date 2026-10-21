@@ -4,8 +4,13 @@ import unittest
 
 from j1939_control.config import ConnectionConfig
 from j1939_control.protocol.commands import (
+    REQUIRED_CAPABILITIES,
+    Capability,
     CommandRequest,
     Opcode,
+    ProtocolInfo,
+    RuntimeFlag,
+    decode_protocol_info,
     decode_response,
     make_set_const_engine_speed,
     physical_engine_speed_to_raw,
@@ -38,6 +43,28 @@ class CommandTests(unittest.TestCase):
             bytes.fromhex("03 2B 00 00 00 00 00 00"),
             CommandRequest(Opcode.START, 0x2B).encode(),
         )
+
+    def test_stop_and_get_status_vectors(self) -> None:
+        self.assertEqual(
+            bytes.fromhex("02 2C 00 00 00 00 00 00"),
+            CommandRequest(Opcode.STOP, 0x2C).encode(),
+        )
+        self.assertEqual(
+            bytes.fromhex("04 2D 00 00 00 00 00 00"),
+            CommandRequest(Opcode.GET_STATUS, 0x2D).encode(),
+        )
+
+    def test_protocol_info_layout(self) -> None:
+        info = ProtocolInfo(major=1, minor=0, schema=1, capabilities=REQUIRED_CAPABILITIES)
+        self.assertEqual(0x1F010001, info.encode())
+        self.assertEqual(info, decode_protocol_info(info.encode()))
+        self.assertIn(Capability.DEDUP_CACHE, info.capabilities)
+
+    def test_get_status_response_layout(self) -> None:
+        response = decode_response(bytes.fromhex("84 2D 00 03 01 00 01 1F"))
+        self.assertEqual(Opcode.GET_STATUS, response.request_opcode)
+        self.assertEqual(int(RuntimeFlag.RUNNING | RuntimeFlag.ENGINE_SPEED_CONFIGURED), response.detail)
+        self.assertEqual(REQUIRED_CAPABILITIES, decode_protocol_info(response.value).capabilities)
 
     def test_resolution_rounding(self) -> None:
         self.assertEqual(1, physical_engine_speed_to_raw(0.125))

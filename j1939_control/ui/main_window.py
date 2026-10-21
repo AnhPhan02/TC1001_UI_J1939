@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import ConnectionConfig
+from ..protocol.commands import ProtocolInfo, RuntimeFlag, capability_names
 from ..workers.can_worker import CanWorker
 
 
@@ -30,6 +31,8 @@ class MainWindow(QMainWindow):
     connect_requested = Signal(str, object)
     disconnect_requested = Signal()
     tc1001_requested = Signal()
+    status_requested = Signal()
+    stop_requested = Signal()
     apply_requested = Signal(float)
 
     def __init__(self, *, initial_backend: str = "mock") -> None:
@@ -47,6 +50,8 @@ class MainWindow(QMainWindow):
         self.connect_requested.connect(self._worker.connect_backend)
         self.disconnect_requested.connect(self._worker.disconnect_backend)
         self.tc1001_requested.connect(self._worker.send_tc1001)
+        self.status_requested.connect(self._worker.get_status)
+        self.stop_requested.connect(self._worker.stop_transmission)
         self.apply_requested.connect(self._worker.apply_engine_speed)
         self._worker.connected.connect(self._on_connected)
         self._worker.disconnected.connect(self._on_disconnected)
@@ -54,6 +59,8 @@ class MainWindow(QMainWindow):
         self._worker.stm32_ready.connect(self._on_stm32_ready)
         self._worker.command_result.connect(self._on_command_result)
         self._worker.readback_changed.connect(self._on_readback_changed)
+        self._worker.protocol_info_changed.connect(self._on_protocol_info_changed)
+        self._worker.runtime_status_changed.connect(self._on_runtime_status_changed)
         self._worker.log_message.connect(self._append_log)
         self._thread.start()
         self._set_state("Disconnected", "#9b1c1c")
@@ -82,6 +89,9 @@ class MainWindow(QMainWindow):
         self.check_button = QPushButton("Retry STM32 Check")
         self.check_button.setEnabled(False)
         self.check_button.clicked.connect(self.tc1001_requested.emit)
+        self.status_button = QPushButton("Get Status")
+        self.status_button.setEnabled(False)
+        self.status_button.clicked.connect(self.status_requested.emit)
         self.state_label = QLabel()
 
         connection_layout.addWidget(QLabel("Backend"), 0, 0)
@@ -97,7 +107,20 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.connect_button, 2, 2)
         connection_layout.addWidget(self.check_button, 2, 3)
         connection_layout.addWidget(QLabel("State"), 3, 0)
-        connection_layout.addWidget(self.state_label, 3, 1, 1, 3)
+        connection_layout.addWidget(self.state_label, 3, 1, 1, 2)
+        connection_layout.addWidget(self.status_button, 3, 3)
+
+        protocol_group = QGroupBox("STM32 Protocol")
+        protocol_layout = QFormLayout(protocol_group)
+        self.protocol_version_label = QLabel("-")
+        self.schema_label = QLabel("-")
+        self.capabilities_label = QLabel("-")
+        self.runtime_label = QLabel("Unknown")
+        self.capabilities_label.setWordWrap(True)
+        protocol_layout.addRow("Version", self.protocol_version_label)
+        protocol_layout.addRow("Schema", self.schema_label)
+        protocol_layout.addRow("Capabilities", self.capabilities_label)
+        protocol_layout.addRow("Runtime", self.runtime_label)
 
         signal_group = QGroupBox("Engine Speed - EEC1 / PGN 61444 / SPN 190 / key 103")
         signal_layout = QFormLayout(signal_group)
@@ -112,9 +135,13 @@ class MainWindow(QMainWindow):
         self.apply_button.clicked.connect(
             lambda: self.apply_requested.emit(self.engine_speed_spin.value())
         )
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_requested.emit)
         value_row.addWidget(self.engine_speed_spin)
         value_row.addWidget(QLabel("rpm"))
         value_row.addWidget(self.apply_button)
+        value_row.addWidget(self.stop_button)
         self.readback_label = QLabel("-")
         self.readback_status_label = QLabel("No data")
         self.last_received_label = QLabel("-")
@@ -131,6 +158,7 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_edit)
 
         layout.addWidget(connection_group)
+        layout.addWidget(protocol_group)
         layout.addWidget(signal_group)
         layout.addWidget(log_group, 1)
         self.setCentralWidget(central)
@@ -164,8 +192,11 @@ class MainWindow(QMainWindow):
         self.connect_button.setText("Disconnect")
         self.connect_button.setEnabled(True)
         self.check_button.setEnabled(True)
+        self.status_button.setEnabled(True)
         self.backend_combo.setEnabled(False)
         self.apply_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self._reset_device_display()
         self._set_state("CAN Connected - verifying STM32...", "#0969a2")
 
     @Slot()
@@ -175,8 +206,11 @@ class MainWindow(QMainWindow):
         self.connect_button.setText("Connect")
         self.connect_button.setEnabled(True)
         self.check_button.setEnabled(False)
+        self.status_button.setEnabled(False)
         self.backend_combo.setEnabled(True)
         self.apply_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self._reset_device_display()
         self._set_state("Disconnected", "#9b1c1c")
 
     @Slot(str)
@@ -189,15 +223,21 @@ class MainWindow(QMainWindow):
     def _on_stm32_ready(self) -> None:
         self._ready = True
         self.apply_button.setEnabled(True)
+        self.stop_button.setEnabled(True)
         self._set_state("STM32 Ready", "#1a7f37")
 
     @Slot(str, bool)
     def _on_command_result(self, message: str, succeeded: bool) -> None:
         self.statusBar().showMessage(message, 5000)
         self._append_log(("OK: " if succeeded else "ERROR: ") + message)
-        if not succeeded and message.startswith("TC1001"):
+        if not succeeded and (
+            message.startswith("TC1001")
+            or message.startswith("GET_STATUS")
+            or message.startswith("Incompatible STM32")
+        ):
             self._ready = False
             self.apply_button.setEnabled(False)
+            self.stop_button.setEnabled(False)
             self._set_state("CAN Connected - STM32 not verified", "#9a6700")
 
     @Slot(object, str)
@@ -208,6 +248,35 @@ class MainWindow(QMainWindow):
             self.readback_label.setText(f"{float(value):.3f} rpm")
             self.last_received_label.setText(datetime.now().astimezone().isoformat(timespec="seconds"))
         self.readback_status_label.setText(state)
+
+    @Slot(object)
+    def _on_protocol_info_changed(self, info: object) -> None:
+        if not isinstance(info, ProtocolInfo):
+            return
+        self.protocol_version_label.setText(info.version)
+        self.schema_label.setText(str(info.schema))
+        names = capability_names(info.capabilities)
+        self.capabilities_label.setText(", ".join(names) if names else "None")
+
+    @Slot(object)
+    def _on_runtime_status_changed(self, flags: object) -> None:
+        runtime = RuntimeFlag(int(flags))
+        state = "Running" if RuntimeFlag.RUNNING in runtime else "Stopped"
+        configured = (
+            "engine speed configured"
+            if RuntimeFlag.ENGINE_SPEED_CONFIGURED in runtime
+            else "no value configured"
+        )
+        self.runtime_label.setText(f"{state} — {configured}")
+
+    def _reset_device_display(self) -> None:
+        self.protocol_version_label.setText("-")
+        self.schema_label.setText("-")
+        self.capabilities_label.setText("-")
+        self.runtime_label.setText("Unknown")
+        self.readback_label.setText("-")
+        self.readback_status_label.setText("No data")
+        self.last_received_label.setText("-")
 
     @Slot(str)
     def _append_log(self, message: str) -> None:

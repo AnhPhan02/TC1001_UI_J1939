@@ -9,7 +9,20 @@ from ..backend.base import CanBackend, CanFrame
 from ..backend.mock import MockBackend
 from ..backend.tsmaster_native import TSMasterBackend
 from ..config import ConnectionConfig
-from ..protocol.commands import CommandRequest, Opcode, decode_response, make_set_const_engine_speed
+from ..protocol.commands import (
+    PROTOCOL_SCHEMA_VERSION,
+    PROTOCOL_VERSION_MAJOR,
+    REQUIRED_CAPABILITIES,
+    Capability,
+    CommandRequest,
+    Opcode,
+    ProtocolInfo,
+    RuntimeFlag,
+    capability_names,
+    decode_protocol_info,
+    decode_response,
+    make_set_const_engine_speed,
+)
 from ..protocol.j1939 import EEC1_PGN, decode_eec1_engine_speed, parse_j1939_id
 
 
@@ -17,6 +30,8 @@ from ..protocol.j1939 import EEC1_PGN, decode_eec1_engine_speed, parse_j1939_id
 class PendingRequest:
     opcode: Opcode
     deadline: float
+    request: CommandRequest | None = None
+    retries_remaining: int = 1
 
 
 class CanWorker(QObject):
@@ -26,6 +41,8 @@ class CanWorker(QObject):
     stm32_ready = Signal()
     command_result = Signal(str, bool)
     readback_changed = Signal(object, str)
+    protocol_info_changed = Signal(object)
+    runtime_status_changed = Signal(object)
     log_message = Signal(str)
 
     ACK_TIMEOUT_SECONDS = 1.0
@@ -39,6 +56,8 @@ class CanWorker(QObject):
         self._pending: dict[int, PendingRequest] = {}
         self._last_readback_at: float | None = None
         self._stale_emitted = False
+        self._compatible = False
+        self._runtime_flags = RuntimeFlag(0)
         self._timer: QTimer | None = None
 
     @Slot()
@@ -69,6 +88,8 @@ class CanWorker(QObject):
         self._pending.clear()
         self._last_readback_at = None
         self._stale_emitted = False
+        self._compatible = False
+        self._runtime_flags = RuntimeFlag(0)
         self.connected.emit()
         mapping = getattr(backend, "mapping_description", None)
         self.log_message.emit(
@@ -92,6 +113,10 @@ class CanWorker(QObject):
         self._backend = None
         self._config = None
         self._pending.clear()
+        self._last_readback_at = None
+        self._stale_emitted = False
+        self._compatible = False
+        self._runtime_flags = RuntimeFlag(0)
         if emit_signal:
             self.disconnected.emit()
 
@@ -100,12 +125,36 @@ class CanWorker(QObject):
         if any(item.opcode is Opcode.TC1001 for item in self._pending.values()):
             self.command_result.emit("TC1001 verification is already in progress", False)
             return
+        self._compatible = False
         self._send_request(CommandRequest(Opcode.TC1001, self._next_sequence()))
+
+    @Slot()
+    def get_status(self) -> None:
+        if any(item.opcode is Opcode.GET_STATUS for item in self._pending.values()):
+            self.command_result.emit("GET_STATUS is already in progress", False)
+            return
+        self._send_request(CommandRequest(Opcode.GET_STATUS, self._next_sequence()))
+
+    @Slot()
+    def stop_transmission(self) -> None:
+        if not self._compatible:
+            self.command_result.emit("STM32 protocol is not verified", False)
+            return
+        if any(
+            item.opcode in (Opcode.SET_CONST, Opcode.START, Opcode.STOP)
+            for item in self._pending.values()
+        ):
+            self.command_result.emit("A control command is already in progress", False)
+            return
+        self._send_request(CommandRequest(Opcode.STOP, self._next_sequence()))
 
     @Slot(float)
     def apply_engine_speed(self, rpm: float) -> None:
+        if not self._compatible:
+            self.command_result.emit("STM32 protocol is not verified", False)
+            return
         if any(
-            item.opcode in (Opcode.SET_CONST, Opcode.START)
+            item.opcode in (Opcode.SET_CONST, Opcode.START, Opcode.STOP)
             for item in self._pending.values()
         ):
             self.command_result.emit("SET_CONST/START sequence is already in progress", False)
@@ -140,6 +189,7 @@ class CanWorker(QObject):
         self._pending[request.sequence] = PendingRequest(
             opcode=request.opcode,
             deadline=time.monotonic() + self.ACK_TIMEOUT_SECONDS,
+            request=request,
         )
         self.log_message.emit(
             f"TX 0x{frame.can_id:08X} [{len(payload)}] {payload.hex(' ').upper()} "
@@ -162,7 +212,22 @@ class CanWorker(QObject):
         now = time.monotonic()
         expired = [sequence for sequence, item in self._pending.items() if item.deadline <= now]
         for sequence in expired:
-            item = self._pending.pop(sequence)
+            item = self._pending.get(sequence)
+            if item is None:
+                continue
+            if item.retries_remaining > 0 and item.request is not None:
+                try:
+                    self._retry_request(item)
+                except Exception as exc:
+                    self._pending.pop(sequence, None)
+                    if item.opcode in (Opcode.TC1001, Opcode.GET_STATUS):
+                        self._compatible = False
+                    self.command_result.emit(str(exc), False)
+                    self.log_message.emit(f"TX RETRY ERROR: {exc}")
+                continue
+            self._pending.pop(sequence, None)
+            if item.opcode in (Opcode.TC1001, Opcode.GET_STATUS):
+                self._compatible = False
             message = f"{item.opcode.name} timeout (seq=0x{sequence:02X})"
             self.command_result.emit(message, False)
 
@@ -173,6 +238,24 @@ class CanWorker(QObject):
         ):
             self._stale_emitted = True
             self.readback_changed.emit(None, "Stale")
+
+    def _retry_request(self, pending: PendingRequest) -> None:
+        if self._backend is None or self._config is None or pending.request is None:
+            raise RuntimeError("Cannot retry while disconnected")
+        payload = pending.request.encode()
+        frame = CanFrame(
+            channel=self._config.channel,
+            can_id=self._config.request_can_id,
+            data=payload,
+        )
+        self._backend.send(frame)
+        pending.retries_remaining -= 1
+        pending.deadline = time.monotonic() + self.ACK_TIMEOUT_SECONDS
+        self.log_message.emit(
+            f"TX RETRY 0x{frame.can_id:08X} [{len(payload)}] "
+            f"{payload.hex(' ').upper()} {pending.opcode.name} "
+            f"seq=0x{pending.request.sequence:02X}"
+        )
 
     def _handle_frame(self, frame: CanFrame) -> None:
         if self._config is None or frame.is_tx or not frame.is_extended:
@@ -221,18 +304,67 @@ class CanWorker(QObject):
             message = f"{response.request_opcode.name} applied"
             self.command_result.emit(message, True)
             if response.request_opcode is Opcode.TC1001:
-                self.stm32_ready.emit()
+                self.log_message.emit("TC1001 accepted; querying protocol/status...")
+                self.get_status()
+            elif response.request_opcode is Opcode.GET_STATUS:
+                self._handle_status_response(response.detail, response.value)
             elif response.request_opcode is Opcode.SET_CONST:
                 self.log_message.emit("SET_CONST accepted; sending START...")
                 self._send_request(CommandRequest(Opcode.START, self._next_sequence()))
             elif response.request_opcode is Opcode.START:
+                self._runtime_flags |= (
+                    RuntimeFlag.RUNNING | RuntimeFlag.ENGINE_SPEED_CONFIGURED
+                )
+                self.runtime_status_changed.emit(self._runtime_flags)
                 self.readback_changed.emit(None, "Waiting for EEC1")
+            elif response.request_opcode is Opcode.STOP:
+                self._last_readback_at = None
+                self._stale_emitted = False
+                self._runtime_flags &= ~RuntimeFlag.RUNNING
+                self.runtime_status_changed.emit(self._runtime_flags)
+                self.readback_changed.emit(None, "Stopped")
         else:
+            if response.request_opcode in (Opcode.TC1001, Opcode.GET_STATUS):
+                self._compatible = False
             message = (
                 f"{response.request_opcode.name} rejected: "
                 f"status={response.status}, detail={response.detail}"
             )
             self.command_result.emit(message, False)
+
+    def _handle_status_response(self, detail: int, value: int) -> None:
+        info = decode_protocol_info(value)
+        runtime = RuntimeFlag(detail)
+        self._runtime_flags = runtime
+        self.protocol_info_changed.emit(info)
+        self.runtime_status_changed.emit(runtime)
+
+        problems: list[str] = []
+        if info.major != PROTOCOL_VERSION_MAJOR:
+            problems.append(
+                f"protocol major {info.major} (expected {PROTOCOL_VERSION_MAJOR})"
+            )
+        if info.schema != PROTOCOL_SCHEMA_VERSION:
+            problems.append(
+                f"schema {info.schema} (expected {PROTOCOL_SCHEMA_VERSION})"
+            )
+        missing = Capability(int(REQUIRED_CAPABILITIES) & ~int(info.capabilities))
+        if missing:
+            problems.append("missing " + ", ".join(capability_names(missing)))
+        if problems:
+            self._compatible = False
+            self.command_result.emit(
+                "Incompatible STM32: " + "; ".join(problems),
+                False,
+            )
+            return
+
+        self._compatible = True
+        self.stm32_ready.emit()
+        self.log_message.emit(
+            f"STM32 protocol v{info.version}, schema {info.schema}, "
+            f"capabilities={','.join(capability_names(info.capabilities))}"
+        )
 
     @Slot()
     def shutdown(self) -> None:

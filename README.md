@@ -78,7 +78,9 @@ python -m unittest discover -s tests -v
 python main.py --backend mock
 ```
 
-In the UI, click **Connect**. The app automatically sends one TC1001 verification request.
+In the UI, click **Connect**. The app automatically sends `TC1001`, followed by `GET_STATUS`.
+The UI enables control only when protocol major `1`, schema `1`, and all required capabilities
+are present. Protocol version, schema, capabilities and runtime state are shown in the UI.
 Use **Retry STM32 Check** only if the first request times out. Leave Engine Speed at `1500`,
 then click **Apply** after the state changes to **STM32 Ready**.
 The mock backend must show this command sequence:
@@ -88,7 +90,8 @@ The mock backend must show this command sequence:
 - automatic TX `START` payload `03 .. 00 00 00 00 00 00`;
 - RX successful `START` ACK `83 .. 00 00 00 00 00 00`;
 - EEC1 ID `0x0CF00480` and readback `1500.000 rpm`;
-- `Stale` after one second without another EEC1 frame.
+- **Get Status** refreshes the running/configured state;
+- **Stop** sends opcode `0x02`, stops EEC1 generation and changes readback to `Stopped`.
 
 ## Run against TSMaster
 
@@ -105,8 +108,16 @@ RX uses `tsfifo_receive_can_msgs` with a packed `TLIBCAN`; TX uses
 never accepted as STM32 feedback. The logical channel must already be mapped to the intended
 physical adapter in TSMaster.
 
-The proprietary opcode contract (`TC1001=0x01`, `SET_CONST=0x10`, `START=0x03`, signal key
-`103`) must be implemented in STM32 firmware. After a successful `SET_CONST` ACK, the UI
+The proprietary opcode contract (`TC1001=0x01`, `STOP=0x02`, `START=0x03`,
+`GET_STATUS=0x04`, `SET_CONST=0x10`, signal key `103`) must be implemented in STM32 firmware.
+`GET_STATUS` returns runtime flags in `detail` and packs protocol major/minor/schema/capabilities
+into the 32-bit response value (bytes `major minor schema capability-mask`). The current contract
+is `1.0`, schema `1`, capability mask `0x1F`.
+
+Every request waits one second and is retried once with the exact same sequence and payload.
+Firmware must keep a bounded dedup cache keyed by `(source address, opcode, sequence)` and replay
+the cached ACK without repeating side effects. The mock uses 64 entries with a five-second TTL.
+After a successful `SET_CONST` ACK, the UI
 automatically sends `START`; EEC1 is accepted as readback only after independent RX from the
 bus. A successful CAN transmit is not treated as an application ACK.
 Physical values that fall halfway between two raw steps use decimal round-half-up; the UI itself
