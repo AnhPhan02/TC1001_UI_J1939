@@ -1,7 +1,7 @@
 [project]
 name = "j1939-control-app"
 version = "0.1.0"
-description = "Single-signal J1939 control UI for TSMaster COM Automation"
+description = "40-SPN J1939 profile control and monitoring UI for TSMaster"
 requires-python = ">=3.11"
 dependencies = [
     "PySide6==6.11.0",

@@ -309,8 +309,9 @@ class CanWorker(QObject):
             elif response.request_opcode is Opcode.GET_STATUS:
                 self._handle_status_response(response.detail, response.value)
             elif response.request_opcode is Opcode.SET_CONST:
-                self.log_message.emit("SET_CONST accepted; sending START...")
-                self._send_request(CommandRequest(Opcode.START, self._next_sequence()))
+                self.log_message.emit(
+                    "SET_CONST accepted; START is reserved for the completed batch flow"
+                )
             elif response.request_opcode is Opcode.START:
                 self._runtime_flags |= (
                     RuntimeFlag.RUNNING | RuntimeFlag.ENGINE_SPEED_CONFIGURED
@@ -371,3 +372,10 @@ class CanWorker(QObject):
         if self._timer is not None:
             self._timer.stop()
         self._disconnect_impl(emit_signal=False)
+
+
+# Keep the historic import path stable while the implementation lives in the
+# profile-specific worker module. LegacyCanWorker remains available only for
+# old protocol-reference code.
+LegacyCanWorker = CanWorker
+from .profile_worker import ProfileCanWorker as CanWorker  # noqa: E402

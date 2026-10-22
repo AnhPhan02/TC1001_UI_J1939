@@ -293,3 +293,9 @@ class MainWindow(QMainWindow):
             self._thread.quit()
             self._thread.wait(3000)
         super().closeEvent(event)
+
+
+# Preserve the original import path for callers while making the P3-A window
+# the active UI. The legacy class remains available for protocol reference.
+LegacyMainWindow = MainWindow
+from .profile_window import MainWindow  # noqa: E402

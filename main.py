@@ -9,7 +9,7 @@ from j1939_control.ui.main_window import MainWindow
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="J1939 Engine Speed control UI")
+    parser = argparse.ArgumentParser(description="J1939 P3-A 40-SPN control UI")
     parser.add_argument(
         "--backend",
         choices=("mock", "tsmaster"),

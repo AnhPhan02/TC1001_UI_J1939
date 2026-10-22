@@ -1,22 +1,22 @@
 # J1939 Control App
 
-A Windows/PySide6 desktop application that commands an STM32 over Classic CAN to publish J1939 EEC1 Engine Speed (SPN 190), then receives EEC1 as independent readback.
+A Windows/PySide6 desktop application that configures the fixed **P3-A — 40 SPN / 11 PGN / 480 frame/s** profile on an STM32 over Classic CAN and monitors the resulting traffic through TSMaster.
 
-The current vertical slice supports one signal: **Engine Speed**. It includes a deterministic offline simulator (`mock`) and a hardware backend that calls the native `TSMaster.dll` API (`tsmaster`).
+The active entry point now uses the 40-SPN batch UI. See [P3A_40_SPN_UI.md](P3A_40_SPN_UI.md) for the current workflow, reset limitation, RX-rate validation, and `.asc` recording. The older Engine Speed material later in this file is retained only as protocol-history/reference and is not the active UI flow.
 
-> **Current status:** the full offline flow is implemented and all 39 tests pass. Native TSMaster loading and the CAN record ABI are verified. End-to-end acceptance on a physical CAN bus still needs a saved trace from the target STM32 and adapter.
+> **Current status:** the offline batch flow and failure/retry paths are implemented and covered by 44 tests. Physical CAN acceptance still requires a reset STM32 and a saved trace from the target adapter.
 
 ## 0. Overview
 
 ### What the program does
 
 1. Connects to the mock backend or a CAN adapter through TSMaster.
-2. Verifies the STM32 with `TC1001`.
-3. Reads protocol version, schema, capabilities, and runtime state with `GET_STATUS`.
-4. Sends an Engine Speed setpoint with `SET_CONST`.
-5. Sends `START` only after the `SET_CONST` application ACK succeeds.
-6. Receives EEC1 from the bus, decodes SPN 190, and displays it as readback.
-7. Sends `STOP` to stop EEC1 transmission.
+2. Verifies the STM32 with `TC1001`, then reads `GET_STATUS`.
+3. Sends `STOP` and waits for its ACK.
+4. Sends the 40 fixed `SET_CONST` commands one at a time, waiting for every ACK.
+5. Sends one `START` only after ACK 40 succeeds.
+6. Counts received frames by CAN ID in one-second windows for 11 expected PGNs.
+7. Optionally records TX/RX traffic to a Vector ASCII `.asc` file.
 
 A successful CAN transmit is **not** proof that the STM32 applied a command. The program separately reports transport success, a matching STM32 application ACK, and data confirmation from an independently received EEC1 frame.
 

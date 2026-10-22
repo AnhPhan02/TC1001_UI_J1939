@@ -23,7 +23,7 @@ class CanWorkerSequenceTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QCoreApplication.instance() or QCoreApplication([])
 
-    def test_successful_set_const_automatically_sends_start_then_reads_eec1(self) -> None:
+    def test_successful_standalone_set_const_never_sends_start(self) -> None:
         worker = CanWorker()
         logs: list[str] = []
         results: list[tuple[str, bool]] = []
@@ -45,14 +45,12 @@ class CanWorkerSequenceTests(unittest.TestCase):
 
         status_index = next(index for index, line in enumerate(logs) if "GET_STATUS seq=0x02" in line)
         set_index = next(index for index, line in enumerate(logs) if "SET_CONST seq=0x03" in line)
-        start_index = next(index for index, line in enumerate(logs) if "START seq=0x04" in line)
         self.assertLess(status_index, set_index)
-        self.assertLess(set_index, start_index)
         self.assertEqual("1.0", protocol_infos[-1].version)
-        self.assertIn(RuntimeFlag.RUNNING, runtime_states[-1])
         self.assertIn(("SET_CONST applied", True), results)
-        self.assertIn(("START applied", True), results)
-        self.assertIn((1500.0, "Fresh"), readbacks)
+        self.assertFalse(any("START seq=" in line for line in logs))
+        self.assertFalse(readbacks)
+        self.assertNotIn(RuntimeFlag.RUNNING, runtime_states[-1])
         worker.shutdown()
 
     def test_rejected_set_const_does_not_send_start(self) -> None:

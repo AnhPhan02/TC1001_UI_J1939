@@ -6,6 +6,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 
 from ..config import ConnectionConfig
+from ..profiles import PROFILE_40_PGNS, PROFILE_40_SIGNALS
 from ..protocol.commands import (
     ENGINE_SPEED_SIGNAL_KEY,
     PROTOCOL_SCHEMA_VERSION,
@@ -36,8 +37,9 @@ class MockBackend:
     def __init__(self) -> None:
         self._config: ConnectionConfig | None = None
         self._rx: deque[CanFrame] = deque()
-        self._engine_speed_raw: int | None = None
+        self._signal_values: dict[int, int] = {}
         self._running = False
+        self._next_due: dict[str, float] = {}
         self._dedup: OrderedDict[tuple[int, int, int], _CachedResponse] = OrderedDict()
         self.applied_command_count: dict[Opcode, int] = {}
 
@@ -47,8 +49,9 @@ class MockBackend:
     def disconnect(self) -> None:
         self._config = None
         self._rx.clear()
-        self._engine_speed_raw = None
+        self._signal_values.clear()
         self._running = False
+        self._next_due.clear()
         self._dedup.clear()
 
     def send(self, frame: CanFrame) -> None:
@@ -81,23 +84,37 @@ class MockBackend:
         status = 0
         detail = 0
         value = argument32
-        if opcode is Opcode.SET_CONST and argument16 != ENGINE_SPEED_SIGNAL_KEY:
+        supported_keys = {signal.signal_key for signal in PROFILE_40_SIGNALS}
+        supported_keys.add(ENGINE_SPEED_SIGNAL_KEY)
+        if opcode is Opcode.SET_CONST and argument16 not in supported_keys:
             status = 2
             detail = 1
         elif opcode is Opcode.SET_CONST:
-            self._engine_speed_raw = argument32
-        elif opcode is Opcode.START and self._engine_speed_raw is None:
+            if argument16 not in self._signal_values and len(self._signal_values) >= 40:
+                status = 5
+                detail = 40
+            else:
+                self._signal_values[argument16] = argument32
+        elif opcode is Opcode.START and not self._signal_values:
             status = 3
             detail = 1
         elif opcode is Opcode.START:
             self._running = True
+            profile_keys = {signal.signal_key for signal in PROFILE_40_SIGNALS}
+            if profile_keys.issubset(self._signal_values):
+                started = time.monotonic()
+                self._next_due = {
+                    pgn.name: started + (pgn.period_ms / 1000.0)
+                    for pgn in PROFILE_40_PGNS
+                }
         elif opcode is Opcode.STOP:
             self._running = False
+            self._next_due.clear()
         elif opcode is Opcode.GET_STATUS:
             runtime = RuntimeFlag(0)
             if self._running:
                 runtime |= RuntimeFlag.RUNNING
-            if self._engine_speed_raw is not None:
+            if self._signal_values:
                 runtime |= RuntimeFlag.ENGINE_SPEED_CONFIGURED
             detail = int(runtime)
             value = ProtocolInfo(
@@ -113,10 +130,15 @@ class MockBackend:
         if status == 0:
             self.applied_command_count[opcode] = self.applied_command_count.get(opcode, 0) + 1
 
-        if opcode is Opcode.START and status == 0:
-            assert self._engine_speed_raw is not None
+        if (
+            opcode is Opcode.START
+            and status == 0
+            and ENGINE_SPEED_SIGNAL_KEY in self._signal_values
+        ):
             payload = bytearray(b"\xFF" * 8)
-            payload[3:5] = self._engine_speed_raw.to_bytes(2, "little", signed=False)
+            payload[3:5] = self._signal_values[ENGINE_SPEED_SIGNAL_KEY].to_bytes(
+                2, "little", signed=False
+            )
             eec1_id = build_j1939_id(
                 priority=3,
                 pgn=EEC1_PGN,
@@ -184,4 +206,31 @@ class MockBackend:
             self._dedup.pop(key, None)
 
     def receive(self) -> CanFrame | None:
+        self._queue_due_profile_frames()
         return self._rx.popleft() if self._rx else None
+
+    def _queue_due_profile_frames(self) -> None:
+        if not self._running or self._config is None or not self._next_due:
+            return
+        now = time.monotonic()
+        for pgn in PROFILE_40_PGNS:
+            due = self._next_due.get(pgn.name)
+            if due is None or now < due:
+                continue
+            can_id = build_j1939_id(
+                priority=pgn.priority,
+                pgn=pgn.receive_pgn,
+                source_address=self._config.stm32_address,
+                destination_address=pgn.destination_address,
+            )
+            while due <= now:
+                self._rx.append(
+                    CanFrame(
+                        channel=self._config.channel,
+                        can_id=can_id,
+                        data=b"\x00" * 8,
+                        timestamp_us=time.monotonic_ns() // 1_000,
+                    )
+                )
+                due += pgn.period_ms / 1000.0
+            self._next_due[pgn.name] = due

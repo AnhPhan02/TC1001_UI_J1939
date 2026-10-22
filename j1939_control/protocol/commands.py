@@ -144,11 +144,23 @@ def physical_engine_speed_to_raw(rpm: float) -> int:
 
 
 def make_set_const_engine_speed(sequence: int, rpm: float) -> CommandRequest:
+    return make_set_const(
+        sequence=sequence,
+        signal_key=ENGINE_SPEED_SIGNAL_KEY,
+        raw_value=physical_engine_speed_to_raw(rpm),
+    )
+
+
+def make_set_const(sequence: int, signal_key: int, raw_value: int) -> CommandRequest:
+    if not 1 <= signal_key <= 0xFFFF:
+        raise ValueError("Signal key must be in range 1..65535")
+    if not 0 <= raw_value <= 0xFFFFFFFF:
+        raise ValueError("Raw signal value must fit in four bytes")
     return CommandRequest(
         opcode=Opcode.SET_CONST,
         sequence=sequence,
-        argument16=ENGINE_SPEED_SIGNAL_KEY,
-        argument32=physical_engine_speed_to_raw(rpm),
+        argument16=signal_key,
+        argument32=raw_value,
     )
 
 
